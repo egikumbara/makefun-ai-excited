@@ -1,11 +1,12 @@
 // "The Whale in the Teacup" — ai-excited-01 entry.
 //
-// A colossal whale breaches out of a tiny teacup on a wooden table while a
-// tiny onlooker throws their arms up. Scale twist + huge diagonal focal
-// point + flat poster style, drawn procedurally with a small 2D canvas
-// (pixel buffer, shape primitives, tiny bitmap font) and a pure-stdlib PNG
-// writer. Fully deterministic: fixed seed, no timestamps, no I/O besides
-// writing /output/entry.png. Runs on Node 22+, standard library only.
+// A giant whale bursts diagonally out of a tiny teacup on a wooden table
+// while a tiny onlooker throws their arms up. The joke is scale: the whole
+// whale is coming out of the cup. Flat poster style, high contrast, drawn
+// procedurally with a tiny software rasteriser (pixel buffer + shape
+// primitives + a 5x7 bitmap font) and a hand-rolled PNG writer. Standard
+// library only, fully deterministic: one fixed seed, no clocks, no I/O
+// other than writing /output/entry.png. Runs on Node 22.
 //
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
@@ -16,197 +17,174 @@ import { deflateSync } from 'node:zlib';
 const W = 1024;
 const H = 1024;
 
-// ---------------------------------------------------------------------------
-// Deterministic PRNG (mulberry32) — only used for star/droplet placement.
-// ---------------------------------------------------------------------------
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-const rnd = mulberry32(20261116);
-
-// ---------------------------------------------------------------------------
-// Colour helpers: colours are [r, g, b].
-// ---------------------------------------------------------------------------
 type RGB = [number, number, number];
 
-const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
-const mix = (c0: RGB, c1: RGB, t: number): RGB => [
-  Math.round(lerp(c0[0], c1[0], t)),
-  Math.round(lerp(c0[1], c1[1], t)),
-  Math.round(lerp(c0[2], c1[2], t)),
-];
+// --- Seeded PRNG (xorshift32). Only used for stars and droplets. --------
+function xorshift32(seed: number): () => number {
+  let s = seed >>> 0 || 1;
+  return () => {
+    s ^= (s << 13) >>> 0;
+    s ^= s >>> 17;
+    s ^= (s << 5) >>> 0;
+    return (s >>> 0) / 4294967296;
+  };
+}
+const rand = xorshift32(0xC0FFEE);
 
-// ---------------------------------------------------------------------------
-// Canvas: RGB pixel buffer with shape primitives.
-// ---------------------------------------------------------------------------
-class Canvas {
-  readonly w: number;
-  readonly h: number;
-  readonly buf: Uint8Array;
+// --- Colour mixing --------------------------------------------------------
+function blend(a: RGB, b: RGB, t: number): RGB {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
 
-  constructor(w: number, h: number) {
-    this.w = w;
-    this.h = h;
-    this.buf = new Uint8Array(w * h * 3);
-  }
+// --- Image buffer + drawing primitives ------------------------------------
+interface Img {
+  w: number;
+  h: number;
+  data: Uint8Array;
+}
 
-  set(x: number, y: number, c: RGB): void {
-    const ix = Math.round(x);
-    const iy = Math.round(y);
-    if (ix < 0 || iy < 0 || ix >= this.w || iy >= this.h) return;
-    const o = (iy * this.w + ix) * 3;
-    this.buf[o] = c[0];
-    this.buf[o + 1] = c[1];
-    this.buf[o + 2] = c[2];
-  }
+function newImg(w: number, h: number): Img {
+  return { w, h, data: new Uint8Array(w * h * 3) };
+}
 
-  rect(x0: number, y0: number, x1: number, y1: number, c: RGB): void {
-    const xa = Math.max(0, Math.floor(Math.min(x0, x1)));
-    const xb = Math.min(this.w - 1, Math.ceil(Math.max(x0, x1)));
-    const ya = Math.max(0, Math.floor(Math.min(y0, y1)));
-    const yb = Math.min(this.h - 1, Math.ceil(Math.max(y0, y1)));
-    for (let y = ya; y <= yb; y++) {
-      for (let x = xa; x <= xb; x++) {
-        const o = (y * this.w + x) * 3;
-        this.buf[o] = c[0];
-        this.buf[o + 1] = c[1];
-        this.buf[o + 2] = c[2];
-      }
+function put(img: Img, x: number, y: number, c: RGB): void {
+  const ix = Math.round(x);
+  const iy = Math.round(y);
+  if (ix < 0 || iy < 0 || ix >= img.w || iy >= img.h) return;
+  const o = (iy * img.w + ix) * 3;
+  img.data[o] = c[0];
+  img.data[o + 1] = c[1];
+  img.data[o + 2] = c[2];
+}
+
+function fillRect(img: Img, x0: number, y0: number, x1: number, y1: number, c: RGB): void {
+  const xa = Math.max(0, Math.floor(Math.min(x0, x1)));
+  const xb = Math.min(img.w - 1, Math.ceil(Math.max(x0, x1)));
+  const ya = Math.max(0, Math.floor(Math.min(y0, y1)));
+  const yb = Math.min(img.h - 1, Math.ceil(Math.max(y0, y1)));
+  for (let y = ya; y <= yb; y++) {
+    let o = (y * img.w + xa) * 3;
+    for (let x = xa; x <= xb; x++, o += 3) {
+      img.data[o] = c[0];
+      img.data[o + 1] = c[1];
+      img.data[o + 2] = c[2];
     }
-  }
-
-  // Vertical gradient band.
-  vgrad(y0: number, y1: number, top: RGB, bottom: RGB): void {
-    for (let y = Math.max(0, y0); y < Math.min(this.h, y1); y++) {
-      const c = mix(top, bottom, (y - y0) / (y1 - y0));
-      this.rect(0, y, this.w - 1, y, c);
-    }
-  }
-
-  disc(cx: number, cy: number, r: number, c: RGB): void {
-    const r2 = r * r;
-    const xa = Math.max(0, Math.floor(cx - r));
-    const xb = Math.min(this.w - 1, Math.ceil(cx + r));
-    const ya = Math.max(0, Math.floor(cy - r));
-    const yb = Math.min(this.h - 1, Math.ceil(cy + r));
-    for (let y = ya; y <= yb; y++) {
-      const dy = y - cy;
-      for (let x = xa; x <= xb; x++) {
-        const dx = x - cx;
-        if (dx * dx + dy * dy <= r2) {
-          const o = (y * this.w + x) * 3;
-          this.buf[o] = c[0];
-          this.buf[o + 1] = c[1];
-          this.buf[o + 2] = c[2];
-        }
-      }
-    }
-  }
-
-  ellipse(cx: number, cy: number, rx: number, ry: number, c: RGB): void {
-    const xa = Math.max(0, Math.floor(cx - rx));
-    const xb = Math.min(this.w - 1, Math.ceil(cx + rx));
-    const ya = Math.max(0, Math.floor(cy - ry));
-    const yb = Math.min(this.h - 1, Math.ceil(cy + ry));
-    for (let y = ya; y <= yb; y++) {
-      const dy = (y - cy) / ry;
-      for (let x = xa; x <= xb; x++) {
-        const dx = (x - cx) / rx;
-        if (dx * dx + dy * dy <= 1) {
-          const o = (y * this.w + x) * 3;
-          this.buf[o] = c[0];
-          this.buf[o + 1] = c[1];
-          this.buf[o + 2] = c[2];
-        }
-      }
-    }
-  }
-
-  // Filled polygon, even-odd scanline fill. pts: flat [x0,y0,x1,y1,...].
-  poly(pts: number[], c: RGB): void {
-    const n = pts.length / 2;
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (let i = 0; i < n; i++) {
-      minY = Math.min(minY, pts[i * 2 + 1]);
-      maxY = Math.max(maxY, pts[i * 2 + 1]);
-    }
-    const y0 = Math.max(0, Math.floor(minY));
-    const y1 = Math.min(this.h - 1, Math.ceil(maxY));
-    for (let y = y0; y <= y1; y++) {
-      const xs: number[] = [];
-      for (let i = 0; i < n; i++) {
-        const j = (i + 1) % n;
-        const x0 = pts[i * 2];
-        const yA = pts[i * 2 + 1];
-        const x1 = pts[j * 2];
-        const yB = pts[j * 2 + 1];
-        if ((yA <= y && yB > y) || (yB <= y && yA > y)) {
-          xs.push(x0 + ((y - yA) / (yB - yA)) * (x1 - x0));
-        }
-      }
-      xs.sort((a, b) => a - b);
-      for (let k = 0; k + 1 < xs.length; k += 2) {
-        const xa = Math.max(0, Math.ceil(xs[k]));
-        const xb = Math.min(this.w - 1, Math.floor(xs[k + 1]));
-        for (let x = xa; x <= xb; x++) {
-          const o = (y * this.w + x) * 3;
-          this.buf[o] = c[0];
-          this.buf[o + 1] = c[1];
-          this.buf[o + 2] = c[2];
-        }
-      }
-    }
-  }
-
-  // Thick line drawn as a quad.
-  line(x0: number, y0: number, x1: number, y1: number, wdt: number, c: RGB): void {
-    const dx = x1 - x0;
-    const dy = y1 - y0;
-    const len = Math.hypot(dx, dy) || 1;
-    const nx = (-dy / len) * (wdt / 2);
-    const ny = (dx / len) * (wdt / 2);
-    this.poly([x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny], c);
-  }
-
-  // Quadratic bezier point.
-  static qbez(p0: number[], p1: number[], p2: number[], t: number): [number, number] {
-    const u = 1 - t;
-    return [
-      u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
-      u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1],
-    ];
   }
 }
 
-// ---------------------------------------------------------------------------
-// Tiny 5x7 bitmap font (only the glyphs we need). Rows are 5 bits, MSB left.
-// ---------------------------------------------------------------------------
-const FONT: Record<string, number[]> = {
+function vGradient(img: Img, y0: number, y1: number, top: RGB, bottom: RGB): void {
+  for (let y = Math.max(0, y0); y < Math.min(img.h, y1); y++) {
+    fillRect(img, 0, y, img.w - 1, y, blend(top, bottom, (y - y0) / (y1 - y0)));
+  }
+}
+
+function circle(img: Img, cx: number, cy: number, r: number, c: RGB): void {
+  const r2 = r * r;
+  const xa = Math.max(0, Math.floor(cx - r));
+  const xb = Math.min(img.w - 1, Math.ceil(cx + r));
+  const ya = Math.max(0, Math.floor(cy - r));
+  const yb = Math.min(img.h - 1, Math.ceil(cy + r));
+  for (let y = ya; y <= yb; y++) {
+    const dy = y - cy;
+    for (let x = xa; x <= xb; x++) {
+      const dx = x - cx;
+      if (dx * dx + dy * dy <= r2) put(img, x, y, c);
+    }
+  }
+}
+
+function ellipse(img: Img, cx: number, cy: number, rx: number, ry: number, c: RGB): void {
+  const xa = Math.max(0, Math.floor(cx - rx));
+  const xb = Math.min(img.w - 1, Math.ceil(cx + rx));
+  const ya = Math.max(0, Math.floor(cy - ry));
+  const yb = Math.min(img.h - 1, Math.ceil(cy + ry));
+  for (let y = ya; y <= yb; y++) {
+    const dy = (y - cy) / ry;
+    for (let x = xa; x <= xb; x++) {
+      const dx = (x - cx) / rx;
+      if (dx * dx + dy * dy <= 1) put(img, x, y, c);
+    }
+  }
+}
+
+// Even-odd scanline fill. pts is a flat [x0,y0,x1,y1,...] list.
+function polygon(img: Img, pts: number[], c: RGB): void {
+  const n = pts.length / 2;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < n; i++) {
+    lo = Math.min(lo, pts[i * 2 + 1]);
+    hi = Math.max(hi, pts[i * 2 + 1]);
+  }
+  for (let y = Math.max(0, Math.floor(lo)); y <= Math.min(img.h - 1, Math.ceil(hi)); y++) {
+    const xs: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const ax = pts[i * 2];
+      const ay = pts[i * 2 + 1];
+      const bx = pts[j * 2];
+      const by = pts[j * 2 + 1];
+      if ((ay <= y && by > y) || (by <= y && ay > y)) {
+        xs.push(ax + ((y - ay) / (by - ay)) * (bx - ax));
+      }
+    }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      fillRect(img, Math.ceil(xs[k]), y, Math.floor(xs[k + 1]), y, c);
+    }
+  }
+}
+
+// A thick segment rendered as a quad.
+function thickLine(img: Img, x0: number, y0: number, x1: number, y1: number, w: number, c: RGB): void {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = (-dy / len) * (w / 2);
+  const ny = (dx / len) * (w / 2);
+  polygon(
+    img,
+    [x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny],
+    c,
+  );
+}
+
+function quadBezier(p0: [number, number], p1: [number, number], p2: [number, number], t: number): [number, number] {
+  const u = 1 - t;
+  return [
+    u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+    u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1],
+  ];
+}
+
+// --- 5x7 bitmap font (glyphs we need; rows are 5 bits, MSB on the left) ---
+const GLYPHS: Record<string, number[]> = {
   W: [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
   O: [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
   '!': [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100],
 };
 
-function drawText(cv: Canvas, text: string, x: number, y: number, scale: number, c: RGB): void {
+function drawText(img: Img, text: string, x: number, y: number, scale: number, c: RGB): void {
   let cx = x;
   for (const ch of text) {
-    const glyph = FONT[ch];
-    if (!glyph) {
-      cx += 6 * scale;
-      continue;
-    }
-    for (let row = 0; row < 7; row++) {
-      for (let col = 0; col < 5; col++) {
-        if (glyph[row] & (1 << (4 - col))) {
-          cv.rect(cx + col * scale, y + row * scale, cx + (col + 1) * scale - 1, y + (row + 1) * scale - 1, c);
+    const g = GLYPHS[ch];
+    if (g) {
+      for (let row = 0; row < 7; row++) {
+        for (let col = 0; col < 5; col++) {
+          if (g[row] & (1 << (4 - col))) {
+            fillRect(
+              img,
+              cx + col * scale,
+              y + row * scale,
+              cx + (col + 1) * scale - 1,
+              y + (row + 1) * scale - 1,
+              c,
+            );
+          }
         }
       }
     }
@@ -214,218 +192,216 @@ function drawText(cv: Canvas, text: string, x: number, y: number, scale: number,
   }
 }
 
-// ---------------------------------------------------------------------------
-// Palette — flat poster colours, high contrast.
-// ---------------------------------------------------------------------------
-const SKY_TOP: RGB = [8, 22, 48]; // deep midnight blue
-const SKY_BOT: RGB = [16, 66, 102]; // deep teal-blue
-const MOON: RGB = [255, 238, 196];
-const MOON_SHADE: RGB = [232, 205, 150];
-const STAR: RGB = [214, 232, 255];
-const TABLE_TOP: RGB = [146, 94, 44]; // warm amber wood
-const TABLE_BOT: RGB = [84, 48, 20];
-const TABLE_EDGE: RGB = [190, 128, 62];
-const WHALE: RGB = [86, 164, 232]; // bright sky blue — pops on dark sky
-const WHALE_DARK: RGB = [43, 102, 168];
-const BELLY: RGB = [255, 232, 190]; // warm cream belly
-const SPRAY: RGB = [240, 248, 255]; // near-white spray
-const SPRAY_BLUE: RGB = [168, 208, 240];
-const CUP: RGB = [255, 250, 238];
-const CUP_STRIPE: RGB = [30, 140, 140]; // teal stripe
-const SAUCER: RGB = [238, 226, 205];
-const PERSON: RGB = [16, 24, 40];
-const BURST: RGB = [255, 210, 63]; // golden starburst
-const BURST_INK: RGB = [24, 28, 52];
-const SPEED: RGB = [150, 196, 235];
+// --- Palette: flat poster colours, high contrast ---------------------------
+const SKY_TOP: RGB = [10, 24, 50];
+const SKY_BOTTOM: RGB = [18, 64, 100];
+const MOON: RGB = [255, 239, 198];
+const MOON_SPOT: RGB = [230, 203, 148];
+const STAR: RGB = [216, 233, 255];
+const WOOD_TOP: RGB = [150, 96, 46];
+const WOOD_BOTTOM: RGB = [86, 50, 22];
+const WOOD_EDGE: RGB = [192, 130, 64];
+const WHALE: RGB = [88, 166, 234];
+const WHALE_DARK: RGB = [44, 104, 170];
+const BELLY: RGB = [255, 233, 192];
+const FOAM: RGB = [242, 249, 255];
+const FOAM_BLUE: RGB = [170, 210, 242];
+const CUP: RGB = [255, 251, 240];
+const CUP_TEAL: RGB = [28, 142, 142];
+const SAUCER: RGB = [240, 228, 207];
+const SPOON: RGB = [198, 200, 206];
+const PERSON: RGB = [18, 26, 42];
+const INK: RGB = [12, 20, 36];
+const GOLD: RGB = [255, 211, 64];
+const GOLD_INK: RGB = [26, 30, 54];
+const STREAK: RGB = [152, 198, 236];
 
-// ---------------------------------------------------------------------------
-// Scene.
-// ---------------------------------------------------------------------------
-function draw(): Canvas {
-  const cv = new Canvas(W, H);
+// --- The scene --------------------------------------------------------------
+function paint(): Img {
+  const img = newImg(W, H);
 
-  // --- Night sky ---
-  cv.vgrad(0, 860, SKY_TOP, SKY_BOT);
+  // Night sky.
+  vGradient(img, 0, 840, SKY_TOP, SKY_BOTTOM);
 
-  // --- Stars (fixed seed) ---
+  // Stars, keeping the moon's corner clear.
   for (let i = 0; i < 130; i++) {
-    const x = rnd() * W;
-    const y = rnd() * 700;
-    const r = rnd() < 0.12 ? 2.6 : rnd() < 0.4 ? 1.8 : 1.1;
-    // Keep the moon area clear.
-    if (Math.hypot(x - 838, y - 168) < 110) continue;
-    cv.disc(x, y, r, STAR);
+    const x = rand() * W;
+    const y = rand() * 700;
+    if (Math.hypot(x - 835, y - 165) < 115) continue;
+    const r = rand() < 0.12 ? 2.6 : rand() < 0.4 ? 1.8 : 1.1;
+    circle(img, x, y, r, STAR);
   }
 
-  // --- Moon, upper right ---
-  cv.disc(838, 168, 74, MOON);
-  cv.disc(812, 148, 14, MOON_SHADE);
-  cv.disc(862, 190, 10, MOON_SHADE);
-  cv.disc(846, 138, 7, MOON_SHADE);
+  // Moon, upper right, with craters.
+  circle(img, 835, 165, 72, MOON);
+  circle(img, 810, 145, 13, MOON_SPOT);
+  circle(img, 858, 188, 10, MOON_SPOT);
+  circle(img, 844, 135, 7, MOON_SPOT);
 
-  // --- Speed lines: momentum, radiating behind the whale ---
-  const speedLines: [number, number, number, number][] = [
-    [120, 640, 300, 560],
-    [90, 740, 280, 690],
-    [700, 300, 560, 330],
-    [760, 420, 610, 420],
-    [180, 420, 330, 380],
-    [640, 180, 520, 230],
+  // Speed lines: the burst of motion behind the whale.
+  const streaks: [number, number, number, number][] = [
+    [118, 640, 298, 562],
+    [92, 742, 282, 692],
+    [702, 298, 562, 328],
+    [762, 422, 612, 422],
+    [182, 418, 332, 378],
+    [642, 178, 522, 228],
   ];
-  for (const [x0, y0, x1, y1] of speedLines) cv.line(x0, y0, x1, y1, 7, SPEED);
+  for (const [x0, y0, x1, y1] of streaks) thickLine(img, x0, y0, x1, y1, 7, STREAK);
 
-  // --- Table ---
-  cv.vgrad(830, H, TABLE_TOP, TABLE_BOT);
-  cv.rect(0, 830, W - 1, 838, TABLE_EDGE);
+  // Wooden table.
+  vGradient(img, 840, H, WOOD_TOP, WOOD_BOTTOM);
+  fillRect(img, 0, 840, W - 1, 848, WOOD_EDGE);
 
-  // --- The whale: a great arc breaching out of the cup ---
-  // Spine: quadratic bezier from the cup up to the upper left.
-  const p0: number[] = [512, 810];
-  const p1: number[] = [400, 540];
-  const p2: number[] = [310, 250];
-  // Radius along the spine: tail narrow, belly fat, head staying broad
-  // so the head reads as a rounded whale head, not a point.
-  const radiusAt = (t: number): number => {
-    if (t < 0.1) return 26 + (t / 0.1) * 44;
-    if (t < 0.45) return 70 + Math.sin(((t - 0.1) / 0.35) * Math.PI * 0.5) * 80;
-    return 150 - ((t - 0.45) / 0.55) * 55;
-  };
-  // Body: overlapping discs along the spine (140 steps -> smooth silhouette).
+  // The whale: one great arc breaching out of the cup.
+  // Spine runs from the cup (500, 792) up to the head (292, 238).
+  const spine0: [number, number] = [500, 792];
+  const spine1: [number, number] = [392, 522];
+  const spine2: [number, number] = [292, 238];
+
+  // Body width along the spine: narrow tail, fat belly, broad head.
+  function widthAt(t: number): number {
+    if (t < 0.12) return 28 + (t / 0.12) * 42;
+    if (t < 0.45) return 70 + Math.sin(((t - 0.12) / 0.33) * Math.PI * 0.5) * 78;
+    return 148 - ((t - 0.45) / 0.55) * 52;
+  }
+
+  // Body: overlapping discs along the spine.
   for (let i = 0; i <= 140; i++) {
     const t = i / 140;
-    const [x, y] = Canvas.qbez(p0, p1, p2, t);
-    cv.disc(x, y, radiusAt(t), WHALE);
+    const [x, y] = quadBezier(spine0, spine1, spine2, t);
+    circle(img, x, y, widthAt(t), WHALE);
   }
-  // Head: a broad rounded disc at the end of the spine.
-  const [hx, hy] = p2;
-  cv.disc(hx, hy, 102, WHALE);
-  // Dorsal shading: a NARROW darker stripe along the upper-left edge.
+  // Broad rounded head.
+  const [hx, hy] = spine2;
+  circle(img, hx, hy, 100, WHALE);
+
+  // Dark dorsal shading along the upper-left edge of the body.
   for (let i = 0; i <= 90; i++) {
     const t = 0.08 + (i / 90) * 0.8;
-    const [x, y] = Canvas.qbez(p0, p1, p2, t);
-    const [x2, y2] = Canvas.qbez(p0, p1, p2, Math.min(1, t + 0.02));
-    const dx = x2 - x;
-    const dy = y2 - y;
+    const [x, y] = quadBezier(spine0, spine1, spine2, t);
+    const [nx, ny] = quadBezier(spine0, spine1, spine2, Math.min(1, t + 0.02));
+    const dx = nx - x;
+    const dy = ny - y;
     const len = Math.hypot(dx, dy) || 1;
-    const ox = (dy / len) * radiusAt(t) * 0.62;
-    const oy = (-dx / len) * radiusAt(t) * 0.62;
-    cv.disc(x + ox, y + oy, radiusAt(t) * 0.32, WHALE_DARK);
+    const w = widthAt(t);
+    circle(img, x + (dy / len) * w * 0.6, y - (dx / len) * w * 0.6, w * 0.32, WHALE_DARK);
   }
-  // Belly: a NARROW cream band along the lower-right side of the body.
+
+  // Cream belly band along the lower-right side of the body.
   for (let i = 0; i <= 90; i++) {
     const t = 0.15 + (i / 90) * 0.7;
-    const [x, y] = Canvas.qbez(p0, p1, p2, t);
-    const [x2, y2] = Canvas.qbez(p0, p1, p2, Math.min(1, t + 0.02));
-    const dx = x2 - x;
-    const dy = y2 - y;
+    const [x, y] = quadBezier(spine0, spine1, spine2, t);
+    const [nx, ny] = quadBezier(spine0, spine1, spine2, Math.min(1, t + 0.02));
+    const dx = nx - x;
+    const dy = ny - y;
     const len = Math.hypot(dx, dy) || 1;
-    const ox = (-dy / len) * radiusAt(t) * 0.5;
-    const oy = (dx / len) * radiusAt(t) * 0.5;
-    cv.disc(x + ox, y + oy, radiusAt(t) * 0.36, BELLY);
+    const w = widthAt(t);
+    circle(img, x - (dy / len) * w * 0.5, y + (dx / len) * w * 0.5, w * 0.36, BELLY);
   }
   // Cream jaw under the head.
-  cv.disc(hx + 30, hy + 60, 42, BELLY);
+  circle(img, hx + 28, hy + 58, 40, BELLY);
 
   // Pectoral fin, swept back.
-  cv.poly([452, 560, 560, 640, 470, 600], WHALE_DARK);
+  polygon(img, [450, 562, 558, 642, 468, 602], WHALE_DARK);
 
-  // Eye on the head + joyful open mouth below it.
-  cv.disc(hx - 30, hy - 22, 12, [12, 20, 36]);
-  cv.disc(hx - 26, hy - 26, 4, SPRAY);
-  cv.line(hx - 62, hy + 34, hx - 10, hy + 52, 7, WHALE_DARK);
-  cv.line(hx - 10, hy + 52, hx + 42, hy + 44, 7, WHALE_DARK);
+  // Eye + joyful open mouth on the head.
+  circle(img, hx - 28, hy - 20, 12, INK);
+  circle(img, hx - 24, hy - 24, 4, FOAM);
+  thickLine(img, hx - 60, hy + 36, hx - 8, hy + 54, 7, WHALE_DARK);
+  thickLine(img, hx - 8, hy + 54, hx + 44, hy + 46, 7, WHALE_DARK);
 
-  // --- Water exploding out of the cup (behind the cup itself) ---
-  const cupX = 512;
+  // --- Water exploding out of the cup (drawn before the cup itself) ---
+  const cupX = 500;
   const cupY = 800;
-  // Big splash crown around the cup.
-  cv.ellipse(cupX, cupY + 18, 150, 34, SPRAY);
-  cv.ellipse(cupX, cupY + 6, 118, 26, SPRAY_BLUE);
-  cv.ellipse(cupX, cupY + 2, 92, 20, SPRAY);
-  // Splash crown: a jagged foam silhouette behind the cup, peaks of
-  // varying height so it reads as exploding water, not sticks.
-  cv.poly(
+  // Splash pool and crown.
+  ellipse(img, cupX, cupY + 18, 150, 34, FOAM);
+  ellipse(img, cupX, cupY + 6, 118, 26, FOAM_BLUE);
+  ellipse(img, cupX, cupY + 2, 92, 20, FOAM);
+  // Jagged foam crown: peaks of varying height read as exploding water.
+  polygon(
+    img,
     [
-      430, 824, 430, 786, 448, 752, 468, 780, 486, 744, 506, 776,
-      524, 748, 544, 778, 562, 754, 580, 784, 585, 824,
+      418, 824, 418, 786, 436, 740, 456, 780, 474, 730, 494, 776,
+      512, 736, 532, 778, 550, 742, 568, 784, 574, 824,
     ],
-    SPRAY,
+    FOAM,
   );
-  // A few droplets above the crown.
+  // Droplets just above the crown.
   for (let i = 0; i < 22; i++) {
-    const x = 430 + rnd() * 155;
-    const y = 700 + rnd() * 40 - (rnd() < 0.3 ? 26 : 0);
-    cv.disc(x, y, 2 + rnd() * 4, rnd() < 0.5 ? SPRAY : SPRAY_BLUE);
+    const x = 418 + rand() * 156;
+    const y = 700 + rand() * 40 - (rand() < 0.3 ? 26 : 0);
+    circle(img, x, y, 2 + rand() * 4, rand() < 0.5 ? FOAM : FOAM_BLUE);
   }
-  // Droplets flying off the whale and the splash (fixed seed).
+  // Droplets flung off the whale's body.
   for (let i = 0; i < 80; i++) {
-    const t = rnd();
-    const [x, y] = Canvas.qbez(p0, p1, p2, t);
-    const ang = rnd() * Math.PI * 2;
-    const dist = radiusAt(t) + 8 + rnd() * 60;
-    const dx = x + Math.cos(ang) * dist;
-    const dy = y + Math.sin(ang) * dist * 0.8;
-    cv.disc(dx, dy, 2 + rnd() * 4, rnd() < 0.5 ? SPRAY : SPRAY_BLUE);
+    const t = rand();
+    const [x, y] = quadBezier(spine0, spine1, spine2, t);
+    const ang = rand() * Math.PI * 2;
+    const dist = widthAt(t) + 8 + rand() * 60;
+    circle(
+      img,
+      x + Math.cos(ang) * dist,
+      y + Math.sin(ang) * dist * 0.8,
+      2 + rand() * 4,
+      rand() < 0.5 ? FOAM : FOAM_BLUE,
+    );
   }
-  // (No streaks on the body: they read as scratches. Droplets carry it.)
 
-  // --- Teacup, drawn LAST over the whale's tail base so the joke reads:
-  // a tiny cup, and the whole whale is coming out of it. ---
-  cv.ellipse(cupX, cupY + 32, 112, 18, SAUCER);
-  cv.ellipse(cupX, cupY + 30, 92, 14, CUP);
-  // Cup body: tall trapezoid with a wide rim, clearly visible in front
-  // of the tail. The rim ellipse is bisected by the whale's tail, which
-  // is exactly the joke: the whale is coming out of the cup.
-  cv.poly([cupX - 70, cupY - 34, cupX + 70, cupY - 34, cupX + 50, cupY + 28, cupX - 50, cupY + 28], CUP);
-  cv.ellipse(cupX, cupY - 34, 70, 10, CUP);
-  // Teal stripe.
-  cv.poly([cupX - 66, cupY - 16, cupX + 66, cupY - 16, cupX + 60, cupY - 4, cupX - 60, cupY - 4], CUP_STRIPE);
-  // Handle: a bigger squared C on the right side.
-  cv.line(cupX + 70, cupY - 20, cupX + 96, cupY - 20, 10, CUP);
-  cv.line(cupX + 96, cupY - 20, cupX + 104, cupY + 0, 10, CUP);
-  cv.line(cupX + 104, cupY + 0, cupX + 96, cupY + 18, 10, CUP);
-  cv.line(cupX + 96, cupY + 18, cupX + 70, cupY + 18, 10, CUP);
-  // A tiny spoon on the table beside the cup — scale cue.
-  cv.ellipse(668, 818, 12, 8, [198, 200, 206]);
-  cv.line(678, 818, 714, 830, 5, [198, 200, 206]);
+  // --- The teacup, drawn last so it sits in front of the tail base ---
+  // Saucer first, then the cup body, rim, stripe and handle.
+  ellipse(img, cupX, cupY + 32, 118, 18, SAUCER);
+  ellipse(img, cupX, cupY + 30, 98, 14, CUP);
+  polygon(
+    img,
+    [cupX - 78, cupY - 40, cupX + 78, cupY - 40, cupX + 56, cupY + 30, cupX - 56, cupY + 30],
+    CUP,
+  );
+  ellipse(img, cupX, cupY - 40, 78, 11, CUP);
+  polygon(
+    img,
+    [cupX - 74, cupY - 20, cupX + 74, cupY - 20, cupX + 68, cupY - 6, cupX - 68, cupY - 6],
+    CUP_TEAL,
+  );
+  // Handle: a squared C on the right side.
+  thickLine(img, cupX + 78, cupY - 24, cupX + 104, cupY - 24, 10, CUP);
+  thickLine(img, cupX + 104, cupY - 24, cupX + 112, cupY, 10, CUP);
+  thickLine(img, cupX + 112, cupY, cupX + 104, cupY + 20, 10, CUP);
+  thickLine(img, cupX + 104, cupY + 20, cupX + 78, cupY + 20, 10, CUP);
+  // A tiny spoon on the table beside the cup — another scale cue.
+  ellipse(img, 672, 818, 12, 8, SPOON);
+  thickLine(img, 682, 818, 718, 830, 5, SPOON);
 
-  // --- Tiny onlooker, far right, arms thrown up ---
-  const px = 872;
+  // --- Tiny onlooker, far right, arms thrown up in amazement ---
+  const px = 868;
   const py = 800;
-  // Legs.
-  cv.line(px - 6, py + 28, px - 10, py + 62, 7, PERSON);
-  cv.line(px + 6, py + 28, px + 12, py + 62, 7, PERSON);
-  // Body.
-  cv.poly([px - 12, py - 6, px + 12, py - 6, px + 9, py + 30, px - 9, py + 30], PERSON);
-  // Arms up in amazement.
-  cv.line(px - 10, py - 2, px - 30, py - 34, 7, PERSON);
-  cv.line(px + 10, py - 2, px + 32, py - 32, 7, PERSON);
-  // Head.
-  cv.disc(px, py - 18, 11, PERSON);
+  thickLine(img, px - 6, py + 28, px - 10, py + 62, 7, PERSON);
+  thickLine(img, px + 6, py + 28, px + 12, py + 62, 7, PERSON);
+  polygon(img, [px - 12, py - 6, px + 12, py - 6, px + 9, py + 30, px - 9, py + 30], PERSON);
+  thickLine(img, px - 10, py - 2, px - 30, py - 34, 7, PERSON);
+  thickLine(img, px + 10, py - 2, px + 32, py - 32, 7, PERSON);
+  circle(img, px, py - 18, 11, PERSON);
 
-  // --- "WOW!" starburst above the onlooker ---
-  const bx = 788;
-  const by = 618;
-  const burstPts: number[] = [];
+  // --- Golden "WOW!" starburst above the onlooker ---
+  const bx = 780;
+  const by = 612;
+  const star: number[] = [];
   for (let i = 0; i < 24; i++) {
     const ang = (i / 24) * Math.PI * 2 - Math.PI / 2;
     const r = i % 2 === 0 ? 96 : 58;
-    burstPts.push(bx + Math.cos(ang) * r, by + Math.sin(ang) * r);
+    star.push(bx + Math.cos(ang) * r, by + Math.sin(ang) * r);
   }
-  cv.poly(burstPts, BURST);
-  // Dark outline: re-draw the star as a stroked polyline approximation.
+  polygon(img, star, GOLD);
   for (let i = 0; i < 24; i++) {
     const j = (i + 1) % 24;
-    cv.line(burstPts[i * 2], burstPts[i * 2 + 1], burstPts[j * 2], burstPts[j * 2 + 1], 5, BURST_INK);
+    thickLine(img, star[i * 2], star[i * 2 + 1], star[j * 2], star[j * 2 + 1], 5, GOLD_INK);
   }
-  drawText(cv, 'WOW!', bx - 60, by - 17, 5, BURST_INK);
+  drawText(img, 'WOW!', bx - 60, by - 17, 5, GOLD_INK);
 
-  return cv;
+  return img;
 }
 
-// ---------------------------------------------------------------------------
-// Minimal deterministic PNG writer (RGB, 8-bit, filter 0, zlib level 9).
-// ---------------------------------------------------------------------------
+// --- Minimal deterministic PNG writer (RGB, 8-bit, filter 0) ---------------
 const CRC_TABLE: Uint32Array = (() => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -442,37 +418,39 @@ function crc32(buf: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function chunk(type: string, data: Uint8Array): Uint8Array {
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
   const out = new Uint8Array(12 + data.length);
-  const dv = new DataView(out.buffer);
-  dv.setUint32(0, data.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, data.length);
   for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
   out.set(data, 8);
-  dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+  view.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
   return out;
 }
 
-function encodePNG(cv: Canvas): Uint8Array {
-  const raw = new Uint8Array((cv.w * 3 + 1) * cv.h);
-  for (let y = 0; y < cv.h; y++) {
-    raw[y * (cv.w * 3 + 1)] = 0; // filter: none
-    raw.set(cv.buf.subarray(y * cv.w * 3, (y + 1) * cv.w * 3), y * (cv.w * 3 + 1) + 1);
+function toPNG(img: Img): Uint8Array {
+  const raw = new Uint8Array((img.w * 3 + 1) * img.h);
+  for (let y = 0; y < img.h; y++) {
+    raw[y * (img.w * 3 + 1)] = 0; // filter: none
+    raw.set(
+      img.data.subarray(y * img.w * 3, (y + 1) * img.w * 3),
+      y * (img.w * 3 + 1) + 1,
+    );
   }
   const ihdr = new Uint8Array(13);
   const dv = new DataView(ihdr.buffer);
-  dv.setUint32(0, cv.w);
-  dv.setUint32(4, cv.h);
+  dv.setUint32(0, img.w);
+  dv.setUint32(4, img.h);
   ihdr[8] = 8; // bit depth
-  ihdr[9] = 2; // colour type RGB
+  ihdr[9] = 2; // colour type: RGB
   ihdr[10] = 0; // compression
   ihdr[11] = 0; // filter
   ihdr[12] = 0; // interlace
-  const idat = deflateSync(raw, { level: 9 });
   const parts: Uint8Array[] = [
     new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk('IHDR', ihdr),
-    chunk('IDAT', idat),
-    chunk('IEND', new Uint8Array(0)),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(raw, { level: 9 })),
+    pngChunk('IEND', new Uint8Array(0)),
   ];
   const total = parts.reduce((s, p) => s + p.length, 0);
   const out = new Uint8Array(total);
@@ -484,10 +462,7 @@ function encodePNG(cv: Canvas): Uint8Array {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Main.
-// ---------------------------------------------------------------------------
+// --- Main -------------------------------------------------------------------
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 mkdirSync(outDir, { recursive: true });
-const png = encodePNG(draw());
-writeFileSync(join(outDir, 'entry.png'), png);
+writeFileSync(join(outDir, 'entry.png'), toPNG(paint()));
